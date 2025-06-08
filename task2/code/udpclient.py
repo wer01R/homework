@@ -1,87 +1,150 @@
-import random
+import threading
+import time
 import socket
 import struct
+import pandas
 
 TYPE_INIT = 1
 TYPE_AGREE = 2
 TYPE_REQUEST = 3
 TYPE_ANSWER = 4
 
+lock = threading.Lock()
 client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+client_open = False
 
-def client_main():
-    while True:
-        try:
-            HOST = input("输入要连接的服务器的地址：").strip(' ')
-            while True:
-                try:
-                    PORT = int(input("输入要连接的服务器的端口：").strip(' '))
-                    if PORT < 0 or PORT > 65535:
-                        raise ValueError
-                    break
-                except ValueError:
-                    print("端口输入错误，请输入一个0~65535的整数")
-            client.connect((HOST, PORT))
-            break
-        except socket.gaierror:
-            print("尝试连接服务器失败，请检查输入的地址与端口是否正确后重新输入")
-    while True:
-        try:
-            Lmin = int(input("输入最小长度：").strip(' '))
-            Lmax = int(input("输入最大长度：").strip(' '))
-            if Lmin > Lmax or Lmax  > 1000 or Lmin < 0:
-                raise ValueError
-            break
-        except ValueError:
-            print("长度输入错误，请输入正整数并且最小长度不得大于最大长度，最大长度不要超过1000")
 
-    def create_packet(send_type, send_data: bytes):
-        length = len(send_data)
-        return struct.pack('!BI', send_type, length) + send_data
-    def receive_n(receive_socket, n):
-        data_receive = b''
-        while len(data_receive) < n:
-            pack = receive_socket.recv(n - len(data_receive))
-            if not pack:
+class RecPacket:
+    def __init__(self, send_type, send_data: bytes, send_timestamp: int, send_address: tuple, send_id: int):
+        self.send_type = send_type
+        self.send_data = send_data
+        self.send_timestamp = send_timestamp
+        self.send_address = send_address
+        self.send_id = send_id
+
+
+class LockDict:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.dict = {}
+
+    def locked(self):
+        return self.lock
+
+
+while True:
+    try:
+        HOST = input("输入要连接的服务器的地址：").strip(' ')
+        while True:
+            try:
+                PORT = int(input("输入要连接的服务器的端口：").strip(' '))
+                if PORT < 0 or PORT > 65535:
+                    raise ValueError
                 break
-            data_receive += pack
-        return data_receive
-    def receive_packet(receive_socket):
-        header = receive_n(receive_socket, 5)
-        type, length = struct.unpack('!BI', header)
-        body = receive_n(receive_socket, length)
-        return type, length, body
+            except ValueError:
+                print("端口输入错误，请输入一个0~65535的整数")
+        client.connect((socket.gethostbyname(HOST), PORT))
+        client_open = True
+        break
+    except socket.gaierror | ValueError:
+        print("尝试连接服务器失败，请检查输入的地址与端口是否正确后重新输入(仅支持ipv4)")
 
 
-    with open('source.txt', 'r', encoding='utf-8') as f:
-        data = f.read()
-
-    index, arr = 0, []
-    while index < len(data):
-        ran = random.randint(Lmin, Lmax)
-        l = min(ran + index, len(data))
-        arr.append(data[index:l])
-        index = l
-
-    client.sendall(create_packet(TYPE_INIT, len(arr).to_bytes()))
-    type, length, body = receive_packet(client)
-    if type == TYPE_AGREE:
-        get = []
-        for i in range(len(arr)):
-            client.sendall(create_packet(TYPE_REQUEST, arr[i].encode()))
-            type, length, body = receive_packet(client)
-            print(f'{i + 1}: {body.decode()}')
-            get.append(body.decode())
-        print("传输完成")
-        print("开始写文件")
-        with open('target.txt', 'w', encoding='utf-8') as f:
-            for i in range(len(get) - 1, -1, -1):
-                f.write(get[i])
-        print("文件写入完成，保存在target.txt当中")
-    else:
-        print("服务器拒绝连接")
-
-    client.close()
+def is_same_ip(ip1, ip2):
+    return socket.gethostbyname(ip1) == socket.gethostbyname(ip2)
 
 
-client_main()
+def get_timestamp():
+    return int(time.time() * 1000)
+
+
+def create_packet(packet: RecPacket):
+    return struct.pack('!BQI', packet.send_type, packet.send_timestamp, packet.send_id) + packet.send_data
+
+
+def unpack_packet(address, data):
+    send_type, timestamp, send_id = struct.unpack('!BQI', data[:13])
+    send_data = data[13:]
+    return RecPacket(send_type, send_data, timestamp, address, send_id)
+
+
+def handle_receive():
+    global window_size, packet_num, timeout, rtt_arr, client_open
+    while client_open:
+        data_rec, address_rec = client.recvfrom(1024)
+        packet = unpack_packet(address_rec, data_rec)
+        with window_packets.locked():
+            if packet.send_id not in sent_suc_packets:
+                sent_suc_packets.add(packet.send_id)
+                window_size += len(window_packets.dict.get(packet.send_id)[2])
+                window_packets.dict.pop(packet.send_id)
+                rtt = get_timestamp() - packet.send_timestamp
+                rtt_arr.append(rtt)
+                print(
+                    f"第{packet.send_id + 1}个(第{packet.send_id * per_packet_size + 1}~{per_packet_size * packet.send_id + per_packet_size}字节)server端已收到, RTT是{rtt}ms")
+                packet_num -= 1
+                timeout = (timeout + rtt) // (total_packets_num - packet_num)
+            if packet_num == 0:
+                client_open = False
+                client.close()
+                print(f"丢包率: {total_resent_packets_num / total_packets_num * 100}%")
+                rtt_series = pandas.Series(rtt_arr)
+                print(f"最大RTT为{rtt_series.max()} 最小RTT为{rtt_series.min()} 平均RTT为{rtt_series.mean()} RTT的标准差为{rtt_series.std()}")
+
+
+server_thread = threading.Thread(target=handle_receive)
+server_thread.start()
+
+
+def resend_packet():
+    global window_packets, total_resent_packets_num
+    while client_open:
+        time.sleep(0.02)
+        to_resend = []
+        with window_packets.locked():
+            for packet_id, (timestamp, times, data) in window_packets.dict.items():
+                if get_timestamp() - timestamp > timeout:
+                    to_resend.append((packet_id, timestamp, times, data))
+
+        for packet_id, timestamp, times, data in to_resend:
+            if packet_id in sent_suc_packets:
+                continue
+            total_resent_packets_num += 1
+            packet = create_packet(RecPacket(TYPE_REQUEST, data.encode(), get_timestamp(), (), packet_id))
+            if client_open:
+                client.sendto(packet, (HOST, PORT))
+                with window_packets.locked():
+                    window_packets.dict[packet_id] = (get_timestamp(), times + 1, data)
+                if packet_id in sent_suc_packets:
+                    total_resent_packets_num -= 1
+                    continue
+                print(
+                    f"重传第{packet_id + 1}个(第{packet_id * per_packet_size + 1}~{(packet_id + 1) * per_packet_size}字节)数据包")
+
+
+resend_thread = threading.Thread(target=resend_packet)
+resend_thread.start()
+
+total_packets_num = 200
+packet_num = 200
+window_size = 400
+sent_packets_num = 0
+sent_suc_packets = set()
+per_packet_size = 80
+window_packets = LockDict()
+timeout = 500
+total_resent_packets_num = 0
+rtt_arr = []
+
+while sent_packets_num < total_packets_num:
+    if window_size < per_packet_size:
+        continue
+    send_data = ' ' * per_packet_size
+    client.sendto(create_packet(RecPacket(TYPE_REQUEST, send_data.encode(), get_timestamp(), (), sent_packets_num)),
+                  (HOST, PORT))
+    window_size -= per_packet_size
+    with window_packets.locked():
+        window_packets.dict[sent_packets_num] = (get_timestamp(), 0, send_data)
+    print(
+        f"第{sent_packets_num + 1}个(第{sent_packets_num * per_packet_size + 1}~{(sent_packets_num + 1) * per_packet_size}字节)client端已发送")
+    sent_packets_num += 1
