@@ -39,12 +39,21 @@ def handle_client(address_rec, data_rec):
     packet = unpack_packet(address_rec, data_rec)
     if random.random() < 0.05:
         return
-    time.sleep(0.01)
-    server.sendto(create_packet(RecPacket(TYPE_AGREE, b'', packet.send_timestamp, packet.send_address, packet.send_id)), address_rec)
+    time.sleep(0.05)
+    try:
+        if packet.send_type == TYPE_INIT:
+            server.sendto(create_packet(RecPacket(TYPE_AGREE, b'', packet.send_timestamp, packet.send_address, packet.send_id)), address_rec)
+        else:
+            server.sendto(create_packet(RecPacket(TYPE_ANSWER, b'', packet.send_timestamp, packet.send_address, packet.send_id)), address_rec)
+    except Exception:
+        return
 
 
 while True:
-    data, address = server.recvfrom(1024)
+    try:
+        data, address = server.recvfrom(1024)
+    except:
+        continue
     client_thread = threading.Thread(target=handle_client, args=(address, data))
     client_thread.start()
 

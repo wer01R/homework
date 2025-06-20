@@ -44,7 +44,6 @@ while True:
             except ValueError:
                 print("端口输入错误，请输入一个0~65535的整数")
         client.connect((socket.gethostbyname(HOST), PORT))
-        client_open = True
         break
     except socket.gaierror | ValueError:
         print("尝试连接服务器失败，请检查输入的地址与端口是否正确后重新输入(仅支持ipv4)")
@@ -70,9 +69,13 @@ def unpack_packet(address, data):
 
 def handle_receive():
     global window_size, packet_num, timeout, rtt_arr, client_open
+    while not client_open:
+        continue
     while client_open:
         data_rec, address_rec = client.recvfrom(1024)
         packet = unpack_packet(address_rec, data_rec)
+        if packet.send_type == TYPE_AGREE:
+            continue
         with window_packets.locked():
             if packet.send_id not in sent_suc_packets:
                 sent_suc_packets.add(packet.send_id)
@@ -98,6 +101,8 @@ server_thread.start()
 
 def resend_packet():
     global window_packets, total_resent_packets_num
+    while not client_open:
+        continue
     while client_open:
         time.sleep(0.02)
         to_resend = []
@@ -126,7 +131,7 @@ resend_thread = threading.Thread(target=resend_packet)
 resend_thread.start()
 
 total_packets_num = 200
-packet_num = 200
+packet_num = total_packets_num
 window_size = 400
 sent_packets_num = 0
 sent_suc_packets = set()
@@ -136,10 +141,33 @@ timeout = 500
 total_resent_packets_num = 0
 rtt_arr = []
 
+accept = False
+first_time = 0
+
+
+def init_connect():
+    global accept
+    data_rec, address_rec = client.recvfrom(1024)
+    packet = unpack_packet(address_rec, data_rec)
+    if packet.send_type == TYPE_AGREE:
+        accept = True
+
+
 while sent_packets_num < total_packets_num:
+    if not accept:
+        if first_time == 0:
+            threading.Thread(target=init_connect).start()
+        if get_timestamp() - first_time > timeout:
+            first_time = get_timestamp()
+            client.sendto(create_packet(RecPacket(TYPE_INIT, b'', get_timestamp(), (), 0)), (HOST, PORT))
+        continue
+
+    if not client_open:
+        client_open = True
+
     if window_size < per_packet_size:
         continue
-    send_data = ' ' * per_packet_size
+    send_data = 'a' * per_packet_size
     client.sendto(create_packet(RecPacket(TYPE_REQUEST, send_data.encode(), get_timestamp(), (), sent_packets_num)),
                   (HOST, PORT))
     window_size -= per_packet_size
